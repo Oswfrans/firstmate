@@ -2507,6 +2507,29 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+
+# The durable queue's append sequence, read under the queue lock so a
+# concurrent append is never observed half-written.
+WAKE_QUEUE_SEQ=
+wake_queue_seq_read() {
+  WAKE_QUEUE_SEQ=
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -f "$STATE/.wake-queue.seq" ]; then
+    IFS= read -r WAKE_QUEUE_SEQ < "$STATE/.wake-queue.seq" || true
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+# A handling successor's baseline: rows through this sequence already have a
+# predecessor-delivered wake on the way (resurface_after_downtime).
+SUCCESSOR_QUEUE_SEQ=
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  if ! wake_queue_seq_read; then
+    echo "watcher: wake queue sequence could not be read safely; retaining stale lock evidence" >&2
+    exit 1
+  fi
+  SUCCESSOR_QUEUE_SEQ=$WAKE_QUEUE_SEQ
+fi
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -2664,8 +2687,15 @@ resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # A row appended after this successor started has no such wake on the way,
+  # so it takes the ordinary arm check below; otherwise it would wait for this
+  # cycle to close on something else, which a quiet fleet may never produce.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    if ! wake_queue_seq_read; then
+      echo "watcher: wake queue sequence could not be read safely" >&2
+      exit 1
+    fi
+    [ "$WAKE_QUEUE_SEQ" != "$SUCCESSOR_QUEUE_SEQ" ] || return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then

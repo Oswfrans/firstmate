@@ -222,5 +222,59 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: a durable row appended while a handling successor is already running
+# (a captain inbox note, a merge outcome) has no predecessor-delivered wake on
+# the way, so the running cycle itself must surface it. Rows the predecessor
+# already delivered must still not re-announce.
+test_handling_successor_surfaces_mid_cycle_append() {
+  local dir home state fakebin child out now rc
+  dir=$(make_case midcycle-append-successor)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'pending:handling:handed.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  sleep 2.5
+  if ! is_live_non_zombie "$child"; then
+    wait "$child" 2>/dev/null || true
+    fail "handling successor re-announced the predecessor-delivered episode: $(cat "$out")"
+  fi
+  append_wake "$state" check inbox:note-1 "check: captain inbox note note-1 - mid-cycle" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the mid-cycle wake row"; }
+  wait_for_exit "$child" 100
+  rc=$?
+  expect_code 0 "$rc" "handling successor must close on a durable row appended mid-cycle: $(cat "$out")"
+  grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "handling successor did not surface the mid-cycle row: $(cat "$out")"
+  grep -F 'inbox:note-1' "$state/.wake-queue" >/dev/null \
+    || fail "mid-cycle row left the durable queue before acknowledgement"
+  case "$(cat "$state/.watcher-down")" in
+    announced:downtime:*) ;;
+    *) fail "mid-cycle surface did not announce its downtime episode: $(cat "$state/.watcher-down")" ;;
+  esac
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T3_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
+    printf 'T3_MARKER=%s\n' "$(cat "$state/.watcher-down")"
+  fi
+  pass "a handling successor surfaces a durable row appended mid-cycle without re-announcing delivered work"
+}
+
 test_handling_successor_does_not_go_blind
+test_handling_successor_surfaces_mid_cycle_append
 test_unacknowledged_recovery_is_announced_once_per_generation
