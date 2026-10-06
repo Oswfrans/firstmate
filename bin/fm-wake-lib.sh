@@ -962,13 +962,17 @@ _fm_recovery_marker_arm_check() {
 # (docs/watcher-continuity.md "Durable queue and turn-end backstop").
 fm_wake_queue_delivered_record() {  # <bound-seconds>
   local file="$STATE/.wake-queue.delivered-seq" seq='' tmp
-  fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$1" || return 1
+  if ! fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$1"; then
+    rm -f -- "$file"
+    return 1
+  fi
   if [ -f "$STATE/.wake-queue.seq" ]; then
     IFS= read -r seq < "$STATE/.wake-queue.seq" || true
   fi
-  tmp=$(mktemp "${file}.tmp.XXXXXX") || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
-  if ! printf '%s\n' "$seq" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
-    rm -f -- "$tmp"
+  tmp=$(mktemp "${file}.tmp.XXXXXX") || tmp=
+  if [ -z "$tmp" ] || ! printf '%s\n' "$seq" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    [ -z "$tmp" ] || rm -f -- "$tmp"
+    rm -f -- "$file"
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi

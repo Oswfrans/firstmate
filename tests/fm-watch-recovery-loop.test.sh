@@ -318,7 +318,40 @@ test_handling_successor_surfaces_pre_start_append() {
   pass "a handling successor surfaces a durable row appended before it started past the last delivery"
 }
 
+# T5: a delivering close that cannot record its sequence must not leave an
+# older one behind, or every later handling successor would re-announce.
+test_failed_delivered_record_drops_stale_sequence() {
+  local dir state holder lib="$ROOT/bin/fm-wake-lib.sh" i
+  dir=$(make_case delivered-record-failure)
+  state="$dir/state"
+  printf '1\n' > "$state/.wake-queue.delivered-seq"
+  printf '5\n' > "$state/.wake-queue.seq"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    : > "$2"
+    sleep 30
+  ' _ "$lib" "$dir/held" &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/held" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/held" ] || { kill "$holder" 2>/dev/null; fail "queue lock holder did not start"; }
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 1' _ "$lib"; then
+    kill "$holder" 2>/dev/null
+    fail "delivered record reported success while the queue lock was held"
+  fi
+  kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null || true
+  [ ! -e "$state/.wake-queue.delivered-seq" ] \
+    || fail "failed delivered record left a stale sequence: $(cat "$state/.wake-queue.delivered-seq")"
+  pass "a failed delivered-sequence record drops the stale sequence"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
+test_failed_delivered_record_drops_stale_sequence
 test_handling_successor_surfaces_pre_start_append
 test_unacknowledged_recovery_is_announced_once_per_generation
