@@ -654,6 +654,7 @@ fm_lock_recheck_stale_owner() {
 FM_RECOVERY_MARKER_TOKEN=
 FM_RECOVERY_MARKER_ACTION='none'
 FM_RECOVERY_MARKER_WRITTEN_TOKEN=
+FM_RECOVERY_MARKER_SEQ=
 FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
 FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
 
@@ -882,12 +883,15 @@ _fm_recovery_marker_ack() {
 _fm_recovery_marker_arm_check() {
   local marker=$1 lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
+  FM_RECOVERY_MARKER_SEQ=
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
+  # shellcheck disable=SC2034 # Read by callers after this function returns.
+  FM_RECOVERY_MARKER_SEQ=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
       if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then

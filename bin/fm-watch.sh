@@ -2522,14 +2522,9 @@ wake_queue_seq_read() {
 
 # A handling successor's baseline: rows through this sequence already have a
 # predecessor-delivered wake on the way (resurface_after_downtime).
-SUCCESSOR_QUEUE_SEQ=
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-  if ! wake_queue_seq_read; then
-    echo "watcher: wake queue sequence could not be read safely; retaining stale lock evidence" >&2
-    exit 1
-  fi
-  SUCCESSOR_QUEUE_SEQ=$WAKE_QUEUE_SEQ
-fi
+# Captured by the start-time arm check under the queue lock, so an append
+# landing after that check is never folded into the baseline.
+SUCCESSOR_QUEUE_SEQ=$FM_RECOVERY_MARKER_SEQ
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
