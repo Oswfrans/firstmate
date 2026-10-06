@@ -957,6 +957,24 @@ _fm_recovery_marker_arm_check() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
+# Record the queue sequence a delivering watcher close covered, read under the
+# queue lock. A handling successor surfaces only rows appended past it
+# (docs/watcher-continuity.md "Durable queue and turn-end backstop").
+fm_wake_queue_delivered_record() {  # <bound-seconds>
+  local file="$STATE/.wake-queue.delivered-seq" seq='' tmp
+  fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$1" || return 1
+  if [ -f "$STATE/.wake-queue.seq" ]; then
+    IFS= read -r seq < "$STATE/.wake-queue.seq" || true
+  fi
+  tmp=$(mktemp "${file}.tmp.XXXXXX") || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+  if ! printf '%s\n' "$seq" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
 # Apply the owner-documented announced-episode arm transition atomically with
 # the queue read. Handling successors must not call this transition.
 _fm_recovery_marker_reopen_announced() {

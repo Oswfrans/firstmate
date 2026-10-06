@@ -237,6 +237,7 @@ test_handling_successor_surfaces_mid_cycle_append() {
   chmod 600 "$state/.watcher-down"
   printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
   printf '1\n' > "$state/.wake-queue.seq"
+  printf '1\n' > "$state/.wake-queue.delivered-seq"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -275,6 +276,49 @@ test_handling_successor_surfaces_mid_cycle_append() {
   pass "a handling successor surfaces a durable row appended mid-cycle without re-announcing delivered work"
 }
 
+# T4: a row appended after the last delivering close but before a handling
+# successor starts (an adapter retry's backoff after the earlier wake was
+# drained) has no wake on the way. The successor's start announces that
+# episode, so it must surface the row itself rather than swallow it.
+test_handling_successor_surfaces_pre_start_append() {
+  local dir home state fakebin child out rc
+  dir=$(make_case prestart-append-successor)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:handling:drained.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '1\n' > "$state/.wake-queue.seq"
+  printf '1\n' > "$state/.wake-queue.delivered-seq"
+  append_wake "$state" check inbox:note-2 "check: captain inbox note note-2 - during retry backoff" \
+    || fail "could not append the pre-start wake row"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  wait_for_exit "$child" 100
+  rc=$?
+  expect_code 0 "$rc" "handling successor must close on a row appended before it started: $(cat "$out")"
+  grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "handling successor did not surface the pre-start row: $(cat "$out")"
+  grep -F 'inbox:note-2' "$state/.wake-queue" >/dev/null \
+    || fail "pre-start row left the durable queue before acknowledgement"
+  case "$(cat "$state/.watcher-down")" in
+    announced:downtime:*) ;;
+    *) fail "pre-start surface did not keep its downtime episode announced: $(cat "$state/.watcher-down")" ;;
+  esac
+  [ "$(cat "$state/.wake-queue.delivered-seq")" = 2 ] \
+    || fail "surfacing close did not record the sequence it delivered: $(cat "$state/.wake-queue.delivered-seq")"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T4_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
+    printf 'T4_MARKER=%s\n' "$(cat "$state/.watcher-down")"
+  fi
+  pass "a handling successor surfaces a durable row appended before it started past the last delivery"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
+test_handling_successor_surfaces_pre_start_append
 test_unacknowledged_recovery_is_announced_once_per_generation

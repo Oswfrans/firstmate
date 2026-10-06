@@ -2502,8 +2502,23 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
+# A handling successor's baseline: rows through this sequence already have a
+# predecessor-delivered wake on the way (resurface_after_downtime). It is the
+# sequence the start-time arm check saw under the queue lock, so an append
+# landing after that check is never folded into the baseline.
+SUCCESSOR_QUEUE_SEQ=$FM_RECOVERY_MARKER_SEQ
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
+  # A row appended after the last delivering close (say, during a retry
+  # backoff) has no wake on the way even though this start just announced it.
+  DELIVERED_QUEUE_SEQ=
+  if [ -f "$STATE/.wake-queue.delivered-seq" ]; then
+    IFS= read -r DELIVERED_QUEUE_SEQ < "$STATE/.wake-queue.delivered-seq" || true
+  fi
+  if [ "$FM_RECOVERY_MARKER_ACTION" = recover ] && [ -n "$DELIVERED_QUEUE_SEQ" ] \
+    && [ "$DELIVERED_QUEUE_SEQ" != "$SUCCESSOR_QUEUE_SEQ" ]; then
+    WATCHER_RECOVERY_PENDING=1
+  fi
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -2520,11 +2535,6 @@ wake_queue_seq_read() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-# A handling successor's baseline: rows through this sequence already have a
-# predecessor-delivered wake on the way (resurface_after_downtime).
-# Captured by the start-time arm check under the queue lock, so an append
-# landing after that check is never folded into the baseline.
-SUCCESSOR_QUEUE_SEQ=$FM_RECOVERY_MARKER_SEQ
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -2610,6 +2620,9 @@ watcher_cleanup() {
   fm_check_output_cleanup
   fm_capture_output_cleanup
   fm_custom_check_snapshot_cleanup
+  if [ "$owns_lock" -eq 1 ] && [ -n "${FM_WATCH_DELIVERED_REASON:-}" ]; then
+    fm_wake_queue_delivered_record "$CLEANUP_LOCK_BOUND" || true
+  fi
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
       downtime "$CLEANUP_LOCK_BOUND"; then
@@ -2685,7 +2698,7 @@ resurface_after_downtime() {
   # A row appended after this successor started has no such wake on the way,
   # so it takes the ordinary arm check below; otherwise it would wait for this
   # cycle to close on something else, which a quiet fleet may never produce.
-  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ] && [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! wake_queue_seq_read; then
       echo "watcher: wake queue sequence could not be read safely" >&2
       exit 1
