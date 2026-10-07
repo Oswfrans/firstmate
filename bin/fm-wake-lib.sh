@@ -957,15 +957,14 @@ _fm_recovery_marker_arm_check() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-# Record the queue sequence a delivering watcher close covered, read under the
-# queue lock. A handling successor surfaces only rows appended past it
+# Record the current queue sequence in <file> under the held queue lock, or
+# remove <file> when it cannot be recorded so no stale sequence survives. A
+# delivering watcher close records .wake-queue.delivered-seq and every drain
+# presentation records .wake-queue.drained-seq; a handling successor surfaces
+# only rows appended past a drain that covered the last delivery
 # (docs/watcher-continuity.md "Durable queue and turn-end backstop").
-fm_wake_queue_delivered_record() {  # <bound-seconds>
-  local file="$STATE/.wake-queue.delivered-seq" seq='' tmp
-  if ! fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$1"; then
-    rm -f -- "$file"
-    return 1
-  fi
+fm_wake_queue_seq_mark_locked() {  # <file>
+  local file=$1 seq='' tmp
   if [ -f "$STATE/.wake-queue.seq" ]; then
     IFS= read -r seq < "$STATE/.wake-queue.seq" || true
   fi
@@ -973,10 +972,19 @@ fm_wake_queue_delivered_record() {  # <bound-seconds>
   if [ -z "$tmp" ] || ! printf '%s\n' "$seq" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
     [ -z "$tmp" ] || rm -f -- "$tmp"
     rm -f -- "$file"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
+}
+
+fm_wake_queue_delivered_record() {  # <bound-seconds>
+  local file="$STATE/.wake-queue.delivered-seq" status=0
+  if ! fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" "$1"; then
+    rm -f -- "$file"
+    return 1
+  fi
+  fm_wake_queue_seq_mark_locked "$file" || status=1
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
 }
 
 # Apply the owner-documented announced-episode arm transition atomically with

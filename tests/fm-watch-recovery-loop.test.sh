@@ -238,6 +238,7 @@ test_handling_successor_surfaces_mid_cycle_append() {
   printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
   printf '1\n' > "$state/.wake-queue.seq"
   printf '1\n' > "$state/.wake-queue.delivered-seq"
+  printf '1\n' > "$state/.wake-queue.drained-seq"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -276,9 +277,8 @@ test_handling_successor_surfaces_mid_cycle_append() {
   pass "a handling successor surfaces a durable row appended mid-cycle without re-announcing delivered work"
 }
 
-# T4: a row appended after the last delivering close but before a handling
-# successor starts (an adapter retry's backoff after the earlier wake was
-# drained) has no wake on the way. The successor's start announces that
+# T4: a row appended after the drain of the last delivered wake but before a
+# handling successor starts (an adapter retry's backoff) has no wake on the way. The successor's start announces that
 # episode, so it must surface the row itself rather than swallow it.
 test_handling_successor_surfaces_pre_start_append() {
   local dir home state fakebin child out rc
@@ -291,6 +291,7 @@ test_handling_successor_surfaces_pre_start_append() {
   chmod 600 "$state/.watcher-down"
   printf '1\n' > "$state/.wake-queue.seq"
   printf '1\n' > "$state/.wake-queue.delivered-seq"
+  printf '1\n' > "$state/.wake-queue.drained-seq"
   append_wake "$state" check inbox:note-2 "check: captain inbox note note-2 - during retry backoff" \
     || fail "could not append the pre-start wake row"
   out="$dir/watch.out"
@@ -350,8 +351,56 @@ test_failed_delivered_record_drops_stale_sequence() {
   pass "a failed delivered-sequence record drops the stale sequence"
 }
 
+# T6: a row appended after the predecessor's wake was delivered but before the
+# agent drains it is covered by that drain, so the successor must not wake a
+# second time; a row appended after the real drain still surfaces.
+test_handling_successor_leaves_undrained_delivery_to_its_drain() {
+  local dir home state fakebin child out rc
+  dir=$(make_case undrained-delivery-successor)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:delivered.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+  printf '1\n' > "$state/.wake-queue.delivered-seq"
+  printf '0\n' > "$state/.wake-queue.drained-seq"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  append_wake "$state" check inbox:note-3 "check: captain inbox note note-3 - before the drain" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the pre-drain wake row"; }
+  sleep 2.5
+  if ! is_live_non_zombie "$child"; then
+    wait "$child" 2>/dev/null || true
+    fail "handling successor woke for a row its predecessor's undrained wake covers: $(cat "$out")"
+  fi
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "drain failed: $(cat "$dir/drain.err")"; }
+  grep -F 'note-3' "$dir/drain.out" >/dev/null \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "drain did not present the pre-drain row: $(cat "$dir/drain.out")"; }
+  sleep 2.5
+  if ! is_live_non_zombie "$child"; then
+    wait "$child" 2>/dev/null || true
+    fail "handling successor woke a second time after the drain consumed the row: $(cat "$out")"
+  fi
+  append_wake "$state" check inbox:note-4 "check: captain inbox note note-4 - after the drain" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the post-drain wake row"; }
+  wait_for_exit "$child" 100
+  rc=$?
+  expect_code 0 "$rc" "handling successor must close on a row appended after the drain: $(cat "$out")"
+  grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "handling successor did not surface the post-drain row: $(cat "$out")"
+  pass "a handling successor leaves an undrained delivery to its drain and surfaces rows appended after it"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
+test_handling_successor_leaves_undrained_delivery_to_its_drain
 test_failed_delivered_record_drops_stale_sequence
 test_handling_successor_surfaces_pre_start_append
 test_unacknowledged_recovery_is_announced_once_per_generation

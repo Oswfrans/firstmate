@@ -193,9 +193,10 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce the episode its predecessor delivered.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
-A durable row appended after the successor started has no predecessor wake on the way, so the successor surfaces it through the ordinary arm check.
-A delivering watcher close records the queue sequence it covered in `state/.wake-queue.delivered-seq`.
-A successor that starts past that sequence, such as one an adapter retries after a row was appended during its backoff, surfaces that row once instead of treating it as predecessor-delivered.
+A delivering watcher close records the queue sequence it covered in `state/.wake-queue.delivered-seq`, and every drain presentation records the sequence it covered in `state/.wake-queue.drained-seq`.
+A row appended while a delivered wake is still undrained is left to that wake's drain, so it never causes a second wake.
+Once a drain has covered the last delivery, a durable row appended past that drain has no wake on the way, so the successor surfaces it once through the ordinary arm check, whether it arrived mid-cycle or before the successor started (such as during an adapter's retry backoff).
+A missing or unreadable record of either sequence leaves the successor not re-announcing.
 
 ### Manual recovery and other harnesses
 
@@ -468,7 +469,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
 - A handling successor that must surface a durable row appended mid-cycle without re-announcing predecessor-delivered work.
-- A handling successor started after a row was appended past the last delivering close, which must surface that row.
+- A handling successor started after a row was appended past the drain of the last delivery, which must surface that row.
+- A row appended while the delivered wake is still undrained, which must produce no second wake once the real drain consumes it, while a later append still surfaces.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
