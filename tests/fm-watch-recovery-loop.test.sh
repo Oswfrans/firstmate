@@ -409,8 +409,10 @@ test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow
 # way and the successor must surface it rather than wait on main's drain.
 # A <when> of prestart appends the main-owned row before the successor starts,
 # so the successor's own start announces it while the delivery is outstanding.
-test_handling_successor_surfaces_after_branch_drained_delivery() {  # <midcycle|prestart>
-  local when=$1 dir home state fakebin child out rc now
+# A <when> of preclose appends it before the predecessor's delivering close, so
+# it sits below the delivered sequence while the branch grant leaves it out.
+test_handling_successor_surfaces_after_branch_drained_delivery() {  # <midcycle|prestart|preclose>
+  local when=$1 dir home state fakebin child out rc now stale_seq
   dir=$(make_case "branch-drained-delivery-successor-$when")
   home="$dir/home"
   state="$dir/state"
@@ -419,12 +421,18 @@ test_handling_successor_surfaces_after_branch_drained_delivery() {  # <midcycle|
   printf 'pending:downtime:branch.1.aaa\n' > "$state/.watcher-down"
   chmod 600 "$state/.watcher-down"
   printf '0\n' > "$state/.wake-queue.drained-seq"
+  stale_seq=1
+  if [ "$when" = preclose ]; then
+    append_wake "$state" check inbox:note-5 "check: captain inbox note note-5 - before the close" \
+      || fail "could not append the main-owned wake row"
+    stale_seq=2
+  fi
   append_wake "$state" stale fm-window "stale: fm-window" || fail "stale append failed"
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 2' _ "$ROOT/bin/fm-wake-lib.sh" \
     || fail "could not record the predecessor delivery"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" activate "$$" branch-drained \
     || fail "branch owner activation failed"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish branch-drained 1 \
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish branch-drained "$stale_seq" \
     || fail "branch grant publication failed"
   if [ "$when" = prestart ]; then
     append_wake "$state" check inbox:note-5 "check: captain inbox note note-5 - before the successor" \
@@ -470,6 +478,7 @@ test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
 test_handling_successor_surfaces_after_branch_drained_delivery midcycle
 test_handling_successor_surfaces_after_branch_drained_delivery prestart
+test_handling_successor_surfaces_after_branch_drained_delivery preclose
 test_handling_successor_leaves_undrained_delivery_to_its_drain row
 test_handling_successor_leaves_undrained_delivery_to_its_drain norow
 test_failed_delivered_record_drops_drain_record

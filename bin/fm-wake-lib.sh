@@ -964,8 +964,9 @@ _fm_recovery_marker_arm_check() {
 # failure removes .wake-queue.drained-seq, so a successor without that evidence
 # never re-announces.
 fm_wake_queue_seq_mark_locked() {  # <file>
-  local file=$1 seq='' tmp
+  local file=$1 seq=0 tmp
   if [ -f "$STATE/.wake-queue.seq" ]; then
+    seq=
     IFS= read -r seq < "$STATE/.wake-queue.seq" || true
   fi
   tmp=$(mktemp "${file}.tmp.XXXXXX") || tmp=
