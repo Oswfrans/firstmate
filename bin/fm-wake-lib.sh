@@ -959,8 +959,8 @@ _fm_recovery_marker_arm_check() {
 
 # Delivery/drain ordering for handling successors, kept under the queue lock
 # (docs/watcher-continuity.md "Durable queue and turn-end backstop"). A
-# delivering watcher close leaves .wake-queue.delivered-seq outstanding; only a
-# later main drain consumes it and records .wake-queue.drained-seq. Every
+# delivering watcher close leaves .wake-queue.delivered-seq outstanding; a later
+# drain consumes it, and only a main drain records .wake-queue.drained-seq. Every
 # failure removes .wake-queue.drained-seq, so a successor without that evidence
 # never re-announces.
 fm_wake_queue_seq_mark_locked() {  # <file>
@@ -990,7 +990,11 @@ fm_wake_queue_delivered_record() {  # <bound-seconds>
   return "$status"
 }
 
-fm_wake_queue_drained_record_locked() {
+fm_wake_queue_drained_record_locked() {  # <actor>
+  if [ "$1" != main ]; then
+    rm -f -- "$STATE/.wake-queue.delivered-seq"
+    return
+  fi
   fm_wake_queue_seq_mark_locked "$STATE/.wake-queue.drained-seq" || return 1
   if ! rm -f -- "$STATE/.wake-queue.delivered-seq"; then
     rm -f -- "$STATE/.wake-queue.drained-seq"

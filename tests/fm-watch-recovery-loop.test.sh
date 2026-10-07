@@ -404,8 +404,54 @@ test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow
   pass "a handling successor leaves an undrained $variant delivery to its drain and surfaces rows appended after it"
 }
 
+# T7: a delivered wake the supervision branch handles is consumed by the
+# branch's drain, so a main-owned row appended afterwards has no wake on the
+# way and the successor must surface it rather than wait on main's drain.
+test_handling_successor_surfaces_after_branch_drained_delivery() {
+  local dir home state fakebin child out rc
+  dir=$(make_case branch-drained-delivery-successor)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:branch.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '0\n' > "$state/.wake-queue.drained-seq"
+  append_wake "$state" stale fm-window "stale: fm-window" || fail "stale append failed"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 2' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "could not record the predecessor delivery"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" activate "$$" branch-drained \
+    || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish branch-drained 1 \
+    || fail "branch grant publication failed"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-wake-drain.sh" \
+    > "$dir/drain.out" 2> "$dir/drain.err" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "branch drain failed: $(cat "$dir/drain.err")"; }
+  grep -F 'fm-window' "$dir/drain.out" >/dev/null \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "branch drain did not present the delivered row: $(cat "$dir/drain.out")"; }
+  sleep 2.5
+  if ! is_live_non_zombie "$child"; then
+    wait "$child" 2>/dev/null || true
+    fail "handling successor woke for the branch-drained delivery: $(cat "$out")"
+  fi
+  append_wake "$state" check inbox:note-5 "check: captain inbox note note-5 - after the branch drain" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the main-owned wake row"; }
+  wait_for_exit "$child" 100
+  rc=$?
+  expect_code 0 "$rc" "handling successor must close on a main-owned row after a branch drain: $(cat "$out")"
+  grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "handling successor did not surface the main-owned row: $(cat "$out")"
+  pass "a handling successor surfaces a main-owned row once the branch drained the delivered wake"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
+test_handling_successor_surfaces_after_branch_drained_delivery
 test_handling_successor_leaves_undrained_delivery_to_its_drain row
 test_handling_successor_leaves_undrained_delivery_to_its_drain norow
 test_failed_delivered_record_drops_drain_record
