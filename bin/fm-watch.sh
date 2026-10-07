@@ -2522,13 +2522,29 @@ successor_rows_undelivered() {  # <seq>
 # sequence the start-time arm check saw under the queue lock, so an append
 # landing after that check is never folded into the baseline.
 SUCCESSOR_QUEUE_SEQ=$FM_RECOVERY_MARKER_SEQ
+# Set when this start announced rows appended after the outstanding delivery;
+# a branch that consumes that delivery leaves them with no wake on the way.
+SUCCESSOR_RECOVER_DEFERRED=0
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
   # A row appended after the last delivered wake was drained (say, during a
   # retry backoff) has no wake on the way even though this start announced it.
-  if [ "$FM_RECOVERY_MARKER_ACTION" = recover ] \
-    && successor_rows_undelivered "$SUCCESSOR_QUEUE_SEQ"; then
-    WATCHER_RECOVERY_PENDING=1
+  if [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+    if successor_rows_undelivered "$SUCCESSOR_QUEUE_SEQ"; then
+      WATCHER_RECOVERY_PENDING=1
+    else
+      DELIVERED_QUEUE_SEQ=
+      if [ -f "$STATE/.wake-queue.delivered-seq" ]; then
+        IFS= read -r DELIVERED_QUEUE_SEQ < "$STATE/.wake-queue.delivered-seq" || true
+      fi
+      case "$DELIVERED_QUEUE_SEQ:$SUCCESSOR_QUEUE_SEQ" in
+        *[!0-9:]*|:*|*:) ;;
+        *)
+          [ "$((10#$SUCCESSOR_QUEUE_SEQ))" -le "$((10#$DELIVERED_QUEUE_SEQ))" ] \
+            || SUCCESSOR_RECOVER_DEFERRED=1
+          ;;
+      esac
+    fi
   fi
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -2710,6 +2726,10 @@ resurface_after_downtime() {
   # wake on the way, so it takes the ordinary arm check below; otherwise it
   # would wait for this cycle to close on something else, which a quiet fleet
   # may never produce.
+  if [ "$SUCCESSOR_RECOVER_DEFERRED" -eq 1 ] \
+    && successor_rows_undelivered "$SUCCESSOR_QUEUE_SEQ"; then
+    WATCHER_RECOVERY_PENDING=1
+  fi
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ] && [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! wake_queue_seq_read; then
       echo "watcher: wake queue sequence could not be read safely" >&2

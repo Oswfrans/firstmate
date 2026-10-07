@@ -197,6 +197,7 @@ A delivering watcher close leaves `state/.wake-queue.delivered-seq` outstanding,
 A later drain consumes that record under the queue lock.
 A main drain also records the queue sequence it covered in `state/.wake-queue.drained-seq`.
 A supervision-branch drain consumes the delivery without advancing that sequence, so a delivery the branch handled never stays outstanding against main.
+A row appended after the delivery but before the successor started is announced by the successor's start, so once a branch drain consumes that delivery without a main drain covering the row, the successor surfaces it.
 A row appended while a delivery is still outstanding is left to that wake's drain, so it does not cause a second wake.
 Once a main drain has consumed the last delivery, a durable row appended past that drain has no wake on the way, so the successor surfaces it once through the ordinary arm check, whether it arrived mid-cycle or before the successor started (such as during an adapter's retry backoff).
 A failed delivery or drain record removes the drain record, and a missing or unreadable drain record leaves the successor not re-announcing.
@@ -479,7 +480,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A handling successor that must surface a durable row appended mid-cycle without re-announcing predecessor-delivered work.
 - A handling successor started after a row was appended past the drain of the last delivery, which must surface that row.
 - A row appended while the delivered wake is still undrained, with and without a queue row of its own, which must produce no second wake once the real drain consumes it, while a later append still surfaces.
-- A delivered wake drained by the supervision branch, after which a main-owned append must surface.
+- A delivered wake drained by the supervision branch, after which a main-owned append must surface, whether it landed after the successor started or before.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.

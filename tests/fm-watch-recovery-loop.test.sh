@@ -407,9 +407,11 @@ test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow
 # T7: a delivered wake the supervision branch handles is consumed by the
 # branch's drain, so a main-owned row appended afterwards has no wake on the
 # way and the successor must surface it rather than wait on main's drain.
-test_handling_successor_surfaces_after_branch_drained_delivery() {
-  local dir home state fakebin child out rc
-  dir=$(make_case branch-drained-delivery-successor)
+# A <when> of prestart appends the main-owned row before the successor starts,
+# so the successor's own start announces it while the delivery is outstanding.
+test_handling_successor_surfaces_after_branch_drained_delivery() {  # <midcycle|prestart>
+  local when=$1 dir home state fakebin child out rc now
+  dir=$(make_case "branch-drained-delivery-successor-$when")
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -424,34 +426,50 @@ test_handling_successor_surfaces_after_branch_drained_delivery() {
     || fail "branch owner activation failed"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish branch-drained 1 \
     || fail "branch grant publication failed"
+  if [ "$when" = prestart ]; then
+    append_wake "$state" check inbox:note-5 "check: captain inbox note note-5 - before the successor" \
+      || fail "could not append the main-owned wake row"
+  fi
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
   child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  sleep 1
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-wake-drain.sh" \
     > "$dir/drain.out" 2> "$dir/drain.err" \
     || { kill -TERM "$child" 2>/dev/null || true; fail "branch drain failed: $(cat "$dir/drain.err")"; }
   grep -F 'fm-window' "$dir/drain.out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "branch drain did not present the delivered row: $(cat "$dir/drain.out")"; }
-  sleep 2.5
-  if ! is_live_non_zombie "$child"; then
-    wait "$child" 2>/dev/null || true
-    fail "handling successor woke for the branch-drained delivery: $(cat "$out")"
+  if [ "$when" = midcycle ]; then
+    sleep 2.5
+    if ! is_live_non_zombie "$child"; then
+      wait "$child" 2>/dev/null || true
+      fail "handling successor woke for the branch-drained delivery: $(cat "$out")"
+    fi
+    append_wake "$state" check inbox:note-5 "check: captain inbox note note-5 - after the branch drain" \
+      || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the main-owned wake row"; }
   fi
-  append_wake "$state" check inbox:note-5 "check: captain inbox note note-5 - after the branch drain" \
-    || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the main-owned wake row"; }
   wait_for_exit "$child" 100
   rc=$?
   expect_code 0 "$rc" "handling successor must close on a main-owned row after a branch drain: $(cat "$out")"
   grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
     || fail "handling successor did not surface the main-owned row: $(cat "$out")"
-  pass "a handling successor surfaces a main-owned row once the branch drained the delivered wake"
+  pass "a handling successor surfaces a $when main-owned row once the branch drained the delivered wake"
 }
 
 test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
-test_handling_successor_surfaces_after_branch_drained_delivery
+test_handling_successor_surfaces_after_branch_drained_delivery midcycle
+test_handling_successor_surfaces_after_branch_drained_delivery prestart
 test_handling_successor_leaves_undrained_delivery_to_its_drain row
 test_handling_successor_leaves_undrained_delivery_to_its_drain norow
 test_failed_delivered_record_drops_drain_record
