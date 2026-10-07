@@ -237,7 +237,6 @@ test_handling_successor_surfaces_mid_cycle_append() {
   chmod 600 "$state/.watcher-down"
   printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
   printf '1\n' > "$state/.wake-queue.seq"
-  printf '1\n' > "$state/.wake-queue.delivered-seq"
   printf '1\n' > "$state/.wake-queue.drained-seq"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
@@ -278,8 +277,8 @@ test_handling_successor_surfaces_mid_cycle_append() {
 }
 
 # T4: a row appended after the drain of the last delivered wake but before a
-# handling successor starts (an adapter retry's backoff) has no wake on the way. The successor's start announces that
-# episode, so it must surface the row itself rather than swallow it.
+# handling successor starts (an adapter retry's backoff) has no wake on the
+# way. The successor's start announces that episode, so it must surface the row itself rather than swallow it.
 test_handling_successor_surfaces_pre_start_append() {
   local dir home state fakebin child out rc
   dir=$(make_case prestart-append-successor)
@@ -290,7 +289,6 @@ test_handling_successor_surfaces_pre_start_append() {
   printf 'acked:handling:drained.1.aaa\n' > "$state/.watcher-down"
   chmod 600 "$state/.watcher-down"
   printf '1\n' > "$state/.wake-queue.seq"
-  printf '1\n' > "$state/.wake-queue.delivered-seq"
   printf '1\n' > "$state/.wake-queue.drained-seq"
   append_wake "$state" check inbox:note-2 "check: captain inbox note note-2 - during retry backoff" \
     || fail "could not append the pre-start wake row"
@@ -319,13 +317,13 @@ test_handling_successor_surfaces_pre_start_append() {
   pass "a handling successor surfaces a durable row appended before it started past the last delivery"
 }
 
-# T5: a delivering close that cannot record its sequence must not leave an
-# older one behind, or every later handling successor would re-announce.
-test_failed_delivered_record_drops_stale_sequence() {
+# T5: a delivering close that cannot record its delivery must drop the drain
+# record, or a later handling successor would treat the delivery as drained.
+test_failed_delivered_record_drops_drain_record() {
   local dir state holder lib="$ROOT/bin/fm-wake-lib.sh" i
   dir=$(make_case delivered-record-failure)
   state="$dir/state"
-  printf '1\n' > "$state/.wake-queue.delivered-seq"
+  printf '5\n' > "$state/.wake-queue.drained-seq"
   printf '5\n' > "$state/.wake-queue.seq"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -346,27 +344,35 @@ test_failed_delivered_record_drops_stale_sequence() {
   fi
   kill "$holder" 2>/dev/null
   wait "$holder" 2>/dev/null || true
-  [ ! -e "$state/.wake-queue.delivered-seq" ] \
-    || fail "failed delivered record left a stale sequence: $(cat "$state/.wake-queue.delivered-seq")"
-  pass "a failed delivered-sequence record drops the stale sequence"
+  [ ! -e "$state/.wake-queue.drained-seq" ] \
+    || fail "failed delivered record left the drain record: $(cat "$state/.wake-queue.drained-seq")"
+  pass "a failed delivered record drops the drain record"
 }
 
 # T6: a row appended after the predecessor's wake was delivered but before the
 # agent drains it is covered by that drain, so the successor must not wake a
-# second time; a row appended after the real drain still surfaces.
-test_handling_successor_leaves_undrained_delivery_to_its_drain() {
-  local dir home state fakebin child out rc
-  dir=$(make_case undrained-delivery-successor)
+# second time; a row appended after the real drain still surfaces. A <variant>
+# of norow models a wake that appended no queue row of its own (a procevent),
+# so its delivery sits at the sequence the previous turn's drain recorded.
+test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow>
+  local variant=$1 dir home state fakebin child out rc
+  dir=$(make_case "undrained-delivery-successor-$variant")
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
   printf 'pending:downtime:delivered.1.aaa\n' > "$state/.watcher-down"
   chmod 600 "$state/.watcher-down"
-  printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
-  printf '1\n' > "$state/.wake-queue.seq"
-  printf '1\n' > "$state/.wake-queue.delivered-seq"
-  printf '0\n' > "$state/.wake-queue.drained-seq"
+  if [ "$variant" = row ]; then
+    printf '%s\t1\tcheck\tdelivered\tcheck: predecessor delivered\n' "$(date +%s)" > "$state/.wake-queue"
+    printf '1\n' > "$state/.wake-queue.seq"
+    printf '0\n' > "$state/.wake-queue.drained-seq"
+  else
+    printf '5\n' > "$state/.wake-queue.seq"
+    printf '5\n' > "$state/.wake-queue.drained-seq"
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 2' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "could not record the predecessor delivery"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -395,12 +401,13 @@ test_handling_successor_leaves_undrained_delivery_to_its_drain() {
   expect_code 0 "$rc" "handling successor must close on a row appended after the drain: $(cat "$out")"
   grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
     || fail "handling successor did not surface the post-drain row: $(cat "$out")"
-  pass "a handling successor leaves an undrained delivery to its drain and surfaces rows appended after it"
+  pass "a handling successor leaves an undrained $variant delivery to its drain and surfaces rows appended after it"
 }
 
 test_handling_successor_does_not_go_blind
 test_handling_successor_surfaces_mid_cycle_append
-test_handling_successor_leaves_undrained_delivery_to_its_drain
-test_failed_delivered_record_drops_stale_sequence
+test_handling_successor_leaves_undrained_delivery_to_its_drain row
+test_handling_successor_leaves_undrained_delivery_to_its_drain norow
+test_failed_delivered_record_drops_drain_record
 test_handling_successor_surfaces_pre_start_append
 test_unacknowledged_recovery_is_announced_once_per_generation

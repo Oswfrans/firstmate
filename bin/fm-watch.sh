@@ -2502,21 +2502,19 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
-# True when queue sequence <seq> holds rows no wake is on the way for: a drain
-# has covered the last delivering close and <seq> is past that drain. A missing
-# or malformed record answers false, so a handling successor never re-announces.
+# True when queue sequence <seq> holds rows no wake is on the way for: no
+# delivered wake is still outstanding, and <seq> is past the main drain that
+# consumed the last one. A missing or malformed drain record answers false, so
+# a handling successor never re-announces.
 successor_rows_undelivered() {  # <seq>
-  local seq=$1 delivered='' drained=''
-  if [ -f "$STATE/.wake-queue.delivered-seq" ]; then
-    IFS= read -r delivered < "$STATE/.wake-queue.delivered-seq" || true
-  fi
+  local seq=$1 drained=''
+  [ ! -e "$STATE/.wake-queue.delivered-seq" ] || return 1
   if [ -f "$STATE/.wake-queue.drained-seq" ]; then
     IFS= read -r drained < "$STATE/.wake-queue.drained-seq" || true
   fi
   case "$seq" in ''|*[!0-9]*) return 1 ;; esac
-  case "$delivered" in ''|*[!0-9]*) return 1 ;; esac
   case "$drained" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$((10#$drained))" -ge "$((10#$delivered))" ] && [ "$((10#$seq))" -gt "$((10#$drained))" ]
+  [ "$((10#$seq))" -gt "$((10#$drained))" ]
 }
 
 # A handling successor's baseline: rows through this sequence already have a
