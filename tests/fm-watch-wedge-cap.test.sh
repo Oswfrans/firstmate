@@ -1201,6 +1201,14 @@ test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure() {
   mkdir -p "$marker_window/blocker"
   cycle=1
   while [ "$cycle" -le 2 ]; do
+    # A handling successor follows a delivered close, so record that delivery:
+    # otherwise the next cycle surfaces the previous cycle's terminal row as
+    # undelivered (docs/watcher-continuity.md "Durable queue and turn-end
+    # backstop") instead of reaching the cap again.
+    if [ "$cycle" -gt 1 ]; then
+      FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 2' _ "$ROOT/bin/fm-wake-lib.sh" \
+        || fail "could not record the previous cycle's delivery"
+    fi
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1529,6 +1537,14 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood() {
   mkdir -p "$marker_window/blocker"
   cycle=1
   while [ "$cycle" -le 2 ]; do
+    # A handling successor follows a delivered close, so record that delivery:
+    # otherwise the next cycle surfaces the previous cycle's terminal row as
+    # undelivered (docs/watcher-continuity.md "Durable queue and turn-end
+    # backstop") instead of reaching the cap again.
+    if [ "$cycle" -gt 1 ]; then
+      FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 2' _ "$ROOT/bin/fm-wake-lib.sh" \
+        || fail "could not record the previous cycle's delivery"
+    fi
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \

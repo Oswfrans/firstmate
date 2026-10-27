@@ -222,7 +222,90 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
-# T3: a durable row appended while a handling successor is already running
+# T3: a row appended after the predecessor closes but before its handling
+# successor can inspect the queue must survive the handoff and reach main.
+test_handling_successor_resurfaces_a_row_appended_during_startup() {
+  local dir home state fakebin child blocker now out
+  dir=$(make_case recovery-startup-append)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:later.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '%s\t1\tstale\tfm-demo\tstale: fm-demo (the delivered wake)\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+  out="$dir/watch.out"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    : > "$2/queue-held"
+    while [ ! -e "$2/append-now" ]; do sleep 0.02; done
+    fm_wake_append_locked check inbox:n1 "check: captain inbox note n1 - from Basecamp" || exit 1
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" &
+  blocker=$!
+  now=0
+  while [ "$now" -lt 100 ] && [ ! -e "$state/queue-held" ]; do
+    sleep 0.02
+    now=$((now + 1))
+  done
+  [ -e "$state/queue-held" ] || { kill "$blocker" 2>/dev/null || true; fail "fixture: queue lock was not held"; }
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] \
+    || { kill -TERM "$child" "$blocker" 2>/dev/null || true; fail "handling successor did not take the watcher lock"; }
+  : > "$state/append-now"
+  wait "$blocker" || { kill -TERM "$child" 2>/dev/null || true; fail "fixture: startup append failed"; }
+  now=0
+  while [ "$now" -lt 40 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "fixture: handling successor never finished startup"; }
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_begin_handling "$2/.watcher-down" later.1.aaa || exit 1
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    awk -F "\t" "\$2 != 1" "$FM_WAKE_QUEUE" > "$FM_WAKE_QUEUE.tmp" \
+      && mv -f "$FM_WAKE_QUEUE.tmp" "$FM_WAKE_QUEUE" || exit 1
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_recovery_marker_handling_settled "$2/.watcher-down"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "fixture: handled-turn settlement failed"; }
+
+  now=0
+  while [ "$now" -lt 40 ] && kill -0 "$child" 2>/dev/null; do
+    sleep 0.25
+    now=$((now + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "handling successor never resurfaced the startup-window row: $(cat "$out"; cat "$state/.watcher-down")"
+  fi
+  wait "$child" 2>/dev/null || true
+  [ "$(grep -c '^check: rearm-resurface$' "$out")" -eq 1 ] \
+    || fail "handling successor did not close once with the recovery wake: $(cat "$out")"
+  grep "$(printf '\tcheck\tinbox:n1\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the resurfaced inbox row must stay queued for main"
+  grep -E '^(pending|announced):downtime:' "$state/.watcher-down" >/dev/null \
+    || fail "the resurfaced close must leave a deliverable downtime episode: $(cat "$state/.watcher-down")"
+  pass "a handling successor resurfaces a row appended during startup"
+}
+
+# T4: a durable row appended while a handling successor is already running
 # (a captain inbox note, a merge outcome) has no predecessor-delivered wake on
 # the way, so the running cycle itself must surface it. Rows the predecessor
 # already delivered must still not re-announce.
@@ -276,7 +359,7 @@ test_handling_successor_surfaces_mid_cycle_append() {
   pass "a handling successor surfaces a durable row appended mid-cycle without re-announcing delivered work"
 }
 
-# T4: a row appended after the drain of the last delivered wake but before a
+# T5: a row appended after the drain of the last delivered wake but before a
 # handling successor starts (an adapter retry's backoff) has no wake on the
 # way. The successor's start announces that episode, so it must surface the row itself rather than swallow it.
 test_handling_successor_surfaces_pre_start_append() {
@@ -317,7 +400,7 @@ test_handling_successor_surfaces_pre_start_append() {
   pass "a handling successor surfaces a durable row appended before it started past the last delivery"
 }
 
-# T5: a delivering close that cannot record its delivery must drop the drain
+# T6: a delivering close that cannot record its delivery must drop the drain
 # record, or a later handling successor would treat the delivery as drained.
 test_failed_delivered_record_drops_drain_record() {
   local dir state holder lib="$ROOT/bin/fm-wake-lib.sh" i
@@ -349,14 +432,17 @@ test_failed_delivered_record_drops_drain_record() {
   pass "a failed delivered record drops the drain record"
 }
 
-# T6: a row appended after the predecessor's wake was delivered but before the
+# T7: a row appended after the predecessor's wake was delivered but before the
 # agent drains it is covered by that drain, so the successor must not wake a
 # second time; a row appended after the real drain still surfaces. A <variant>
 # of norow models a wake that appended no queue row of its own (a procevent),
 # so its delivery sits at the sequence the previous turn's drain recorded.
-test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow>
-  local variant=$1 dir home state fakebin child out rc
-  dir=$(make_case "undrained-delivery-successor-$variant")
+# A <when> of prestart appends before the successor starts; midcycle appends
+# only after its startup finished, when a durable append has reopened the
+# episode the successor's own poll would otherwise surface.
+test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow> <prestart|midcycle>
+  local variant=$1 when=$2 dir home state fakebin child out rc now
+  dir=$(make_case "undrained-delivery-successor-$variant-$when")
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -373,13 +459,26 @@ test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow
   fi
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_queue_delivered_record 2' _ "$ROOT/bin/fm-wake-lib.sh" \
     || fail "could not record the predecessor delivery"
+  if [ "$when" = prestart ]; then
+    append_wake "$state" check inbox:note-3 "check: captain inbox note note-3 - before the drain" \
+      || fail "could not append the pre-drain wake row"
+  fi
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
   child=$!
-  append_wake "$state" check inbox:note-3 "check: captain inbox note note-3 - before the drain" \
-    || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the pre-drain wake row"; }
+  if [ "$when" = midcycle ]; then
+    now=0
+    while [ "$now" -lt 40 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+      sleep 0.1
+      now=$((now + 1))
+    done
+    [ -e "$state/.last-watcher-beat" ] \
+      || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor never finished startup"; }
+    append_wake "$state" check inbox:note-3 "check: captain inbox note note-3 - before the drain" \
+      || { kill -TERM "$child" 2>/dev/null || true; fail "could not append the pre-drain wake row"; }
+  fi
   sleep 2.5
   if ! is_live_non_zombie "$child"; then
     wait "$child" 2>/dev/null || true
@@ -401,10 +500,10 @@ test_handling_successor_leaves_undrained_delivery_to_its_drain() {  # <row|norow
   expect_code 0 "$rc" "handling successor must close on a row appended after the drain: $(cat "$out")"
   grep -Fx 'check: rearm-resurface' "$out" >/dev/null \
     || fail "handling successor did not surface the post-drain row: $(cat "$out")"
-  pass "a handling successor leaves an undrained $variant delivery to its drain and surfaces rows appended after it"
+  pass "a handling successor leaves an undrained $variant delivery to its drain for a $when row and surfaces rows appended after it"
 }
 
-# T7: a delivered wake the supervision branch handles is consumed by the
+# T8: a delivered wake the supervision branch handles is consumed by the
 # branch's drain, so a main-owned row appended afterwards has no wake on the
 # way and the successor must surface it rather than wait on main's drain.
 # A <when> of prestart appends the main-owned row before the successor starts,
@@ -475,12 +574,15 @@ test_handling_successor_surfaces_after_branch_drained_delivery() {  # <midcycle|
 }
 
 test_handling_successor_does_not_go_blind
+test_handling_successor_resurfaces_a_row_appended_during_startup
 test_handling_successor_surfaces_mid_cycle_append
 test_handling_successor_surfaces_after_branch_drained_delivery midcycle
 test_handling_successor_surfaces_after_branch_drained_delivery prestart
 test_handling_successor_surfaces_after_branch_drained_delivery preclose
-test_handling_successor_leaves_undrained_delivery_to_its_drain row
-test_handling_successor_leaves_undrained_delivery_to_its_drain norow
+test_handling_successor_leaves_undrained_delivery_to_its_drain row prestart
+test_handling_successor_leaves_undrained_delivery_to_its_drain norow prestart
+test_handling_successor_leaves_undrained_delivery_to_its_drain row midcycle
+test_handling_successor_leaves_undrained_delivery_to_its_drain norow midcycle
 test_failed_delivered_record_drops_drain_record
 test_handling_successor_surfaces_pre_start_append
 test_unacknowledged_recovery_is_announced_once_per_generation
